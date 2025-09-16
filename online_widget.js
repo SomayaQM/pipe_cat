@@ -24,7 +24,7 @@ class PipecatWidget extends HTMLElement {
               .hidden { display:none !important;}
           </style>
 
-          <div id="widget-icon">🤖</div>
+          <div id="widget-icon">🎤</div>
           <div id="widget-container">
               <div id="widget-header">
                   <div><span>Pipecat Widget</span><span id="statusIndicator" class="status-indicator"></span></div>
@@ -72,11 +72,14 @@ class PipecatWidget extends HTMLElement {
   }
 
   connectedCallback() {
+      const protoUrl = 'https://cdn.jsdelivr.net/gh/SomayaQM/pipe_cat/frames.proto';
+
       // Load protobuf using global `protobuf`
-      protobuf.load('frames.proto', (err, root) => {
+      protobuf.load(protoUrl, (err, root) => {
           if (err) {
               this.progressText.textContent = 'Error loading protobuf';
-              throw err;
+              console.error(err);
+              return;
           }
           this.Frame = root.lookupType('pipecat.Frame');
           this.progressText.textContent = 'Ready! Click Start Audio';
@@ -157,7 +160,8 @@ class PipecatWidget extends HTMLElement {
   }
 
   initWebSocket() {
-      this.ws = new WebSocket('ws://localhost:8765');
+      const url = this.getAttribute('server-url') || 'ws://localhost:8765';
+      this.ws = new WebSocket(url);
       this.ws.binaryType = 'arraybuffer';
 
       this.ws.addEventListener('open', () => {
