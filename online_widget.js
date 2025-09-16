@@ -1,358 +1,234 @@
-// online_widget.js
-// Must be loaded with <script type="module" src="..."></script>
-
-import * as protobuf from "https://cdn.jsdelivr.net/npm/protobufjs@7/dist/protobuf.min.mjs";
-
-/* Inline protobuf schema (no external frames.proto required) */
-const PROTO = `
-syntax = "proto3";
-package pipecat;
-
-message AudioFrame {
-  bytes audio = 1;
-  int32 sampleRate = 2;
-  int32 numChannels = 3;
-}
-
-message Frame {
-  AudioFrame audio = 1;
-}
-`;
-
-// Parse schema synchronously
-const parsed = protobuf.parse(PROTO);
-const root = parsed.root;
-const FrameType = root.lookupType("pipecat.Frame");
-
-/* Web Component definition */
 class PipecatWidget extends HTMLElement {
   constructor() {
-    super();
-    this.attachShadow({ mode: "open" });
+      super();
+      this.attachShadow({ mode: 'open' });
 
-    // defaults, can be overridden with attribute server-url
-    this.SAMPLE_RATE = 16000;
-    this.NUM_CHANNELS = 1;
-    this.PLAY_TIME_RESET_THRESHOLD_MS = 1.0;
+      // HTML structure
+      this.shadowRoot.innerHTML = `
+          <style>
+              #widget-icon { position: fixed; bottom:20px; right:20px; width:50px; height:50px;
+                  background:#4a6bff; border-radius:50%; display:flex; justify-content:center; align-items:center;
+                  color:white; font-size:24px; cursor:pointer; z-index:9999; transition:0.3s; box-shadow:0 2px 10px rgba(0,0,0,0.2);}
+              #widget-icon:hover { transform: scale(1.1); box-shadow:0 4px 15px rgba(0,0,0,0.3);}
+              #widget-container { position:fixed; bottom:20px; right:20px; width:350px; z-index:10000; display:none;}
+              #widget-header { background:#4a6bff; color:white; padding:10px 15px; border-radius:10px 10px 0 0;
+                  display:flex; justify-content:space-between; align-items:center; cursor:move;}
+              #widget-content { background:white; border:1px solid #ddd; border-top:none; border-radius:0 0 10px 10px; padding:15px;}
+              .status-indicator { display:inline-block; width:10px; height:10px; border-radius:50%; background:#ccc; margin-left:8px;}
+              .status-indicator.connected { background:#4CAF50; box-shadow:0 0 10px #4CAF50;}
+              .button-group { display:flex; gap:10px; margin-top:15px;}
+              button { padding:8px 15px; border:none; border-radius:5px; cursor:pointer; font-weight:bold;}
+              #startAudioBtn { background:#4a6bff; color:white;}
+              #stopAudioBtn { background:#f44336; color:white;}
+              #minimizeBtn,#closeBtn { background:none; color:white; font-size:16px; padding:0 8px;}
+              .hidden { display:none !important;}
+          </style>
 
-    // State
-    this.ws = null;
-    this.audioContext = null;
-    this.microphoneStream = null;
-    this.source = null;
-    this.scriptProcessor = null;
-    this.playTime = 0;
-    this.lastMessageTime = 0;
-    this.isPlaying = false;
-
-    // markup
-    this.shadowRoot.innerHTML = `
-      <style>
-        :host { all: initial; font-family: Arial, sans-serif; }
-        #widget-icon {
-          position: fixed; bottom: 20px; right: 20px;
-          width: 50px; height: 50px; background: #4a6bff;
-          border-radius: 50%; display:flex; justify-content:center; align-items:center;
-          color:white; font-size:24px; cursor:pointer; z-index:999999; box-shadow:0 2px 12px rgba(0,0,0,0.2);
-          transition: transform .12s ease;
-        }
-        #widget-icon:hover { transform: scale(1.08); }
-        #widget-container{
-          position: fixed; bottom: 20px; right: 20px; width: 360px; z-index:1000000; display: none;
-        }
-        #widget-header {
-          background: #4a6bff; color: white; padding: 10px 12px; border-radius: 10px 10px 0 0;
-          display:flex; justify-content:space-between; align-items:center; cursor: move;
-        }
-        #widget-content {
-          background: white; border: 1px solid #ddd; border-top: none; padding: 12px; border-radius: 0 0 10px 10px;
-          box-shadow: 0 8px 18px rgba(0,0,0,0.08);
-        }
-        .status { display:inline-block; width:10px; height:10px; border-radius:50%; background:#ccc; margin-left:8px;}
-        .status.connected { background: #4CAF50; box-shadow: 0 0 8px #4CAF50; }
-        .btn { padding:8px 12px; border-radius:6px; border:none; cursor:pointer; font-weight:600; }
-        .btn-primary { background:#4a6bff; color:white; }
-        .btn-danger { background:#f44336; color:white; }
-        .btn-plain { background: none; color: white; font-size: 16px; padding: 0 8px; }
-        .button-row { display:flex; gap:8px; margin-top:10px; }
-        .hidden { display:none !important; }
-      </style>
-
-      <div id="widget-icon" title="Open Pipecat">🤖</div>
-
-      <div id="widget-container">
-        <div id="widget-header">
-          <div><strong>Pipecat</strong> <span id="status" class="status"></span></div>
-          <div>
-            <button id="minimizeBtn" class="btn-plain">−</button>
-            <button id="closeBtn" class="btn-plain">×</button>
+          <div id="widget-icon">🤖</div>
+          <div id="widget-container">
+              <div id="widget-header">
+                  <div><span>Pipecat Widget</span><span id="statusIndicator" class="status-indicator"></span></div>
+                  <div><button id="minimizeBtn">−</button><button id="closeBtn">×</button></div>
+              </div>
+              <div id="widget-content">
+                  <div id="progressText">Loading, please wait...</div>
+                  <div class="button-group">
+                      <button id="startAudioBtn" disabled>Start Audio</button>
+                      <button id="stopAudioBtn" disabled>Stop Audio</button>
+                  </div>
+              </div>
           </div>
-        </div>
-        <div id="widget-content">
-          <div id="progressText">Loading widget...</div>
-          <div class="button-row">
-            <button id="startBtn" class="btn btn-primary" disabled>Start</button>
-            <button id="stopBtn" class="btn btn-danger" disabled>Stop</button>
-          </div>
-          <div style="margin-top:8px; font-size:12px; color:#666;">
-            Provide server endpoint as attribute: <code>server-url</code>
-          </div>
-        </div>
-      </div>
-    `;
+      `;
 
-    // elements
-    this.icon = this.shadowRoot.querySelector("#widget-icon");
-    this.container = this.shadowRoot.querySelector("#widget-container");
-    this.startBtn = this.shadowRoot.querySelector("#startBtn");
-    this.stopBtn = this.shadowRoot.querySelector("#stopBtn");
-    this.closeBtn = this.shadowRoot.querySelector("#closeBtn");
-    this.minimizeBtn = this.shadowRoot.querySelector("#minimizeBtn");
-    this.progressText = this.shadowRoot.querySelector("#progressText");
-    this.statusEl = this.shadowRoot.querySelector("#status");
+      // Elements
+      this.widget = this.shadowRoot.querySelector('#widget-container');
+      this.widgetIcon = this.shadowRoot.querySelector('#widget-icon');
+      this.content = this.shadowRoot.querySelector('#widget-content');
+      this.startBtn = this.shadowRoot.querySelector('#startAudioBtn');
+      this.stopBtn = this.shadowRoot.querySelector('#stopAudioBtn');
+      this.minimizeBtn = this.shadowRoot.querySelector('#minimizeBtn');
+      this.closeBtn = this.shadowRoot.querySelector('#closeBtn');
+      this.statusIndicator = this.shadowRoot.querySelector('#statusIndicator');
+      this.progressText = this.shadowRoot.querySelector('#progressText');
 
-    // dragging
-    this._drag = { active: false, offsetX: 0, offsetY: 0 };
-  }
+      // Audio / WebSocket variables
+      this.SAMPLE_RATE = 16000;
+      this.NUM_CHANNELS = 1;
+      this.PLAY_TIME_RESET_THRESHOLD_MS = 1.0;
+      this.Frame = null;
+      this.ws = null;
+      this.audioContext = null;
+      this.microphoneStream = null;
+      this.source = null;
+      this.scriptProcessor = null;
+      this.playTime = 0;
+      this.lastMessageTime = 0;
+      this.isPlaying = false;
 
-  // observe server-url attribute so pages can set it after loading
-  static get observedAttributes() { return ["server-url"]; }
-
-  attributeChangedCallback(name, oldVal, newVal) {
-    if (name === "server-url" && oldVal !== newVal) {
-      // If connected, reconnect to new URL
-      if (this.ws) {
-        try { this.ws.close(); } catch(e) {}
-        this.ws = null;
-      }
-      // no auto-reconnect here; user clicks Start to connect to new URL
-      this.progressText.textContent = `Server set to ${newVal}. Click Start to connect.`;
-    }
+      // Dragging
+      this.isDragging = false;
+      this.offsetX = 0;
+      this.offsetY = 0;
   }
 
   connectedCallback() {
-    // UI behavior
-    this.icon.addEventListener("click", () => {
-      this.container.style.display = "block";
-      this.icon.style.display = "none";
-    });
-    this.closeBtn.addEventListener("click", (e) => {
-      e.stopPropagation();
-      this.container.style.display = "none";
-      this.icon.style.display = "flex";
-    });
-    this.minimizeBtn.addEventListener("click", () => {
-      const content = this.shadowRoot.querySelector("#widget-content");
-      content.classList.toggle("hidden");
-      this.minimizeBtn.textContent = content.classList.contains("hidden") ? "+" : "−";
-    });
-
-    // simple draggable
-    const header = this.shadowRoot.querySelector("#widget-header");
-    header.addEventListener("mousedown", (e) => {
-      this._drag.active = true;
-      const rect = this.container.getBoundingClientRect();
-      this._drag.offsetX = e.clientX - rect.left;
-      this._drag.offsetY = e.clientY - rect.top;
-      this.container.style.right = "auto";
-      this.container.style.bottom = "auto";
-    });
-    document.addEventListener("mousemove", (e) => {
-      if (!this._drag.active) return;
-      this.container.style.left = (e.clientX - this._drag.offsetX) + "px";
-      this.container.style.top = (e.clientY - this._drag.offsetY) + "px";
-    });
-    document.addEventListener("mouseup", () => this._drag.active = false);
-
-    // Start/Stop handlers
-    this.startBtn.addEventListener("click", () => this._onStart());
-    this.stopBtn.addEventListener("click", () => this._onStop());
-
-    // ready to use
-    this.progressText.textContent = "Ready — set server-url and click Start";
-    this.startBtn.disabled = false;
-  }
-
-  disconnectedCallback() {
-    this._cleanupAudio();
-    if (this.ws) { try { this.ws.close(); } catch(e) {} }
-  }
-
-  // convenience getter for server URL
-  get serverUrl() {
-    return this.getAttribute("server-url") || "ws://localhost:8765";
-  }
-
-  /* START */
-  async _onStart() {
-    if (!("mediaDevices" in navigator && navigator.mediaDevices.getUserMedia)) {
-      alert("getUserMedia not supported in this browser");
-      return;
-    }
-
-    // UI state
-    this.startBtn.disabled = true;
-    this.stopBtn.disabled = false;
-    this.progressText.textContent = `Connecting to ${this.serverUrl}...`;
-
-    // create audioContext (try to set sampleRate; browser may ignore)
-    try {
-      this.audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: this.SAMPLE_RATE });
-    } catch (e) {
-      // fallback
-      this.audioContext = new (window.AudioContext || window.webkitAudioContext)();
-    }
-
-    // open WS
-    try {
-      this.ws = new WebSocket(this.serverUrl);
-      this.ws.binaryType = "arraybuffer";
-    } catch (e) {
-      this.progressText.textContent = "WebSocket creation failed: " + e.message;
-      this.startBtn.disabled = false;
-      return;
-    }
-
-    this.ws.onopen = async () => {
-      this.progressText.textContent = "Connected — capturing microphone...";
-      this.statusEl.classList.add("connected");
-
-      // start mic
-      try {
-        const stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: this.NUM_CHANNELS } });
-        this.microphoneStream = stream;
-
-        // ScriptProcessor is deprecated but still widely supported; AudioWorklet is better for production
-        const bufferSize = 512; // lower = lower latency
-        this.scriptProcessor = this.audioContext.createScriptProcessor(bufferSize, 1, 1);
-        this.source = this.audioContext.createMediaStreamSource(stream);
-        this.source.connect(this.scriptProcessor);
-        this.scriptProcessor.connect(this.audioContext.destination);
-
-        this.scriptProcessor.onaudioprocess = (event) => {
-          if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
-          const input = event.inputBuffer.getChannelData(0);
-          const int16 = this._floatTo16BitPCM(input);
-          const bytes = new Uint8Array(int16.buffer);
-
-          // Build protobuf Frame
-          const framePayload = {
-            audio: {
-              audio: bytes,
-              sampleRate: this.SAMPLE_RATE,
-              numChannels: this.NUM_CHANNELS
-            }
-          };
-
-          // create and encode (FrameType expects an object where 'audio' has bytes)
-          const created = FrameType.create(framePayload);
-          const encoded = FrameType.encode(created).finish(); // Uint8Array
-          try {
-            this.ws.send(encoded);
-          } catch (e) {
-            console.warn("WS send error:", e);
+      // Load protobuf using global `protobuf`
+      protobuf.load('frames.proto', (err, root) => {
+          if (err) {
+              this.progressText.textContent = 'Error loading protobuf';
+              throw err;
           }
-        };
+          this.Frame = root.lookupType('pipecat.Frame');
+          this.progressText.textContent = 'Ready! Click Start Audio';
+          this.startBtn.disabled = false;
+      });
 
-        this.isPlaying = true;
-        this.progressText.textContent = "Microphone streaming. Waiting for bot audio...";
-      } catch (err) {
-        console.error("getUserMedia error:", err);
-        this.progressText.textContent = "Microphone access denied or unavailable.";
-        this._cleanupAudio();
+      // Open / close
+      this.widgetIcon.addEventListener('click', () => {
+          this.widget.style.display = 'block';
+          this.widgetIcon.style.display = 'none';
+      });
+      this.closeBtn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          this.widget.style.display = 'none';
+          this.widgetIcon.style.display = 'flex';
+      });
+
+      // Minimize
+      this.minimizeBtn.addEventListener('click', () => {
+          this.content.classList.toggle('hidden');
+          this.minimizeBtn.textContent = this.content.classList.contains('hidden') ? '+' : '−';
+      });
+
+      // Start / Stop
+      this.startBtn.addEventListener('click', () => this.startAudio());
+      this.stopBtn.addEventListener('click', () => this.stopAudio(true));
+
+      // Draggable
+      const header = this.shadowRoot.querySelector('#widget-header');
+      header.addEventListener('mousedown', (e) => {
+          this.isDragging = true;
+          this.offsetX = e.clientX - this.widget.getBoundingClientRect().left;
+          this.offsetY = e.clientY - this.widget.getBoundingClientRect().top;
+          this.widget.style.cursor = 'grabbing';
+      });
+      document.addEventListener('mousemove', (e) => {
+          if (!this.isDragging) return;
+          this.widget.style.left = (e.clientX - this.offsetX) + 'px';
+          this.widget.style.top = (e.clientY - this.offsetY) + 'px';
+          this.widget.style.right = 'auto';
+          this.widget.style.bottom = 'auto';
+      });
+      document.addEventListener('mouseup', () => {
+          this.isDragging = false;
+          this.widget.style.cursor = 'default';
+      });
+  }
+
+  startAudio() {
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+          alert('getUserMedia not supported');
+          return;
       }
-    };
+      this.startBtn.disabled = true;
+      this.stopBtn.disabled = false;
 
-    this.ws.onmessage = (ev) => {
-      // incoming audio frames (server must send the same protobuf Frame with encoded audio bytes, e.g. WAV or MP3 bytes)
-      if (!this.isPlaying) return;
-      const ab = ev.data;
-      this._handleIncomingFrame(ab);
-    };
+      this.audioContext = new (window.AudioContext || window.webkitAudioContext)({
+          latencyHint: 'interactive',
+          sampleRate: this.SAMPLE_RATE
+      });
 
-    this.ws.onclose = () => {
-      this.progressText.textContent = "Disconnected from server.";
-      this.statusEl.classList.remove("connected");
+      this.isPlaying = true;
+      this.initWebSocket();
+  }
+
+  stopAudio(closeWebsocket) {
+      this.playTime = 0;
+      this.isPlaying = false;
       this.startBtn.disabled = false;
       this.stopBtn.disabled = true;
-      this._cleanupAudio();
-    };
 
-    this.ws.onerror = (e) => {
-      console.error("WebSocket error:", e);
-      this.progressText.textContent = "WebSocket error (check console)";
-    };
-  }
-
-  /* STOP */
-  _onStop() {
-    this._cleanupAudio();
-    if (this.ws) {
-      try { this.ws.close(); } catch(e) {}
-      this.ws = null;
-    }
-    this.progressText.textContent = "Stopped.";
-    this.startBtn.disabled = false;
-    this.stopBtn.disabled = true;
-    this.statusEl.classList.remove("connected");
-    this.isPlaying = false;
-  }
-
-  _cleanupAudio() {
-    try {
-      if (this.scriptProcessor) { this.scriptProcessor.disconnect(); this.scriptProcessor.onaudioprocess = null; }
-      if (this.source) { this.source.disconnect(); }
-      if (this.microphoneStream) {
-        this.microphoneStream.getTracks().forEach(t => t.stop());
-        this.microphoneStream = null;
+      if (this.ws && closeWebsocket) {
+          this.ws.close();
+          this.ws = null;
       }
-    } catch (e) {
-      console.warn("cleanup error", e);
-    }
+      if (this.scriptProcessor) this.scriptProcessor.disconnect();
+      if (this.source) this.source.disconnect();
   }
 
-  /* Handle incoming protobuf frame (expects 'Frame' with audio field bytes that are playable like WAV/MP3) */
-  async _handleIncomingFrame(arrayBuffer) {
-    try {
-      const parsed = FrameType.decode(new Uint8Array(arrayBuffer));
-      if (!parsed?.audio) return;
+  initWebSocket() {
+      this.ws = new WebSocket('ws://localhost:8765');
+      this.ws.binaryType = 'arraybuffer';
 
-      // server should send encoded audio (wav/mp3) bytes inside the `audio.audio` field
-      const audioBytes = parsed.audio.audio instanceof Uint8Array ? parsed.audio.audio : new Uint8Array(parsed.audio.audio);
+      this.ws.addEventListener('open', () => {
+          this.statusIndicator.classList.add('connected');
+          navigator.mediaDevices.getUserMedia({ audio: { sampleRate: this.SAMPLE_RATE, channelCount: this.NUM_CHANNELS } })
+              .then(stream => {
+                  this.microphoneStream = stream;
+                  this.scriptProcessor = this.audioContext.createScriptProcessor(512, 1, 1);
+                  this.source = this.audioContext.createMediaStreamSource(stream);
+                  this.source.connect(this.scriptProcessor);
+                  this.scriptProcessor.connect(this.audioContext.destination);
 
-      // Reset playTime after pause
+                  this.scriptProcessor.onaudioprocess = (event) => {
+                      if (!this.ws) return;
+                      const audioData = event.inputBuffer.getChannelData(0);
+                      const pcmS16Array = this.convertFloat32ToS16PCM(audioData);
+                      const pcmByteArray = new Uint8Array(pcmS16Array.buffer);
+
+                      const frame = this.Frame.create({
+                          audio: {
+                              audio: Array.from(pcmByteArray),
+                              sampleRate: this.SAMPLE_RATE,
+                              numChannels: this.NUM_CHANNELS
+                          }
+                      });
+                      const encodedFrame = new Uint8Array(this.Frame.encode(frame).finish());
+                      this.ws.send(encodedFrame);
+                  };
+              }).catch(err => console.error('Microphone error:', err));
+      });
+
+      this.ws.addEventListener('message', (event) => {
+          if (this.isPlaying) this.enqueueAudioFromProto(event.data);
+      });
+
+      this.ws.addEventListener('close', () => {
+          this.statusIndicator.classList.remove('connected');
+          this.stopAudio(false);
+      });
+      this.ws.addEventListener('error', e => console.error('WebSocket error:', e));
+  }
+
+  enqueueAudioFromProto(arrayBuffer) {
+      const parsedFrame = this.Frame.decode(new Uint8Array(arrayBuffer));
+      if (!parsedFrame?.audio) return;
+
       const diffTime = this.audioContext.currentTime - this.lastMessageTime;
-      if (this.playTime === 0 || diffTime > this.PLAY_TIME_RESET_THRESHOLD_MS) {
-        this.playTime = this.audioContext.currentTime;
-      }
+      if (this.playTime === 0 || diffTime > this.PLAY_TIME_RESET_THRESHOLD_MS)
+          this.playTime = this.audioContext.currentTime;
       this.lastMessageTime = this.audioContext.currentTime;
 
-      // Decode audio bytes (expects a valid audio container like WAV/MP3)
-      try {
-        const decoded = await this.audioContext.decodeAudioData(audioBytes.buffer.slice(0));
-        const src = this.audioContext.createBufferSource();
-        src.buffer = decoded;
-        src.connect(this.audioContext.destination);
-        src.start(this.playTime);
-        this.playTime += decoded.duration;
-      } catch (err) {
-        console.error("decodeAudioData failed:", err);
-      }
-    } catch (err) {
-      console.error("Failed to decode incoming proto frame:", err);
-    }
+      const audioVector = Array.from(parsedFrame.audio.audio);
+      const audioArray = new Uint8Array(audioVector);
+
+      this.audioContext.decodeAudioData(audioArray.buffer, (buffer) => {
+          const source = new AudioBufferSourceNode(this.audioContext);
+          source.buffer = buffer;
+          source.start(this.playTime);
+          source.connect(this.audioContext.destination);
+          this.playTime += buffer.duration;
+      });
   }
 
-  /* helper: float32 -> Int16 */
-  _floatTo16BitPCM(float32Array) {
-    const l = float32Array.length;
-    const int16 = new Int16Array(l);
-    for (let i = 0; i < l; i++) {
-      let s = Math.max(-1, Math.min(1, float32Array[i]));
-      int16[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
-    }
-    return int16;
+  convertFloat32ToS16PCM(float32Array) {
+      const int16Array = new Int16Array(float32Array.length);
+      for (let i = 0; i < float32Array.length; i++) {
+          const clamped = Math.max(-1, Math.min(1, float32Array[i]));
+          int16Array[i] = clamped < 0 ? clamped * 32768 : clamped * 32767;
+      }
+      return int16Array;
   }
 }
 
-customElements.define("pipecat-widget", PipecatWidget);
+customElements.define('pipecat-widget', PipecatWidget);
