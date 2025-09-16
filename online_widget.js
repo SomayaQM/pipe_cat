@@ -40,7 +40,6 @@ class PipecatWidget extends HTMLElement {
           </div>
       `;
 
-      // Elements
       this.widget = this.shadowRoot.querySelector('#widget-container');
       this.widgetIcon = this.shadowRoot.querySelector('#widget-icon');
       this.content = this.shadowRoot.querySelector('#widget-content');
@@ -51,7 +50,6 @@ class PipecatWidget extends HTMLElement {
       this.statusIndicator = this.shadowRoot.querySelector('#statusIndicator');
       this.progressText = this.shadowRoot.querySelector('#progressText');
 
-      // Audio / WebSocket variables
       this.SAMPLE_RATE = 16000;
       this.NUM_CHANNELS = 1;
       this.PLAY_TIME_RESET_THRESHOLD_MS = 1.0;
@@ -65,20 +63,17 @@ class PipecatWidget extends HTMLElement {
       this.lastMessageTime = 0;
       this.isPlaying = false;
 
-      // Dragging
       this.isDragging = false;
       this.offsetX = 0;
       this.offsetY = 0;
   }
 
   connectedCallback() {
-      const protoUrl = 'https://cdn.jsdelivr.net/gh/SomayaQM/pipe_cat/frames.proto';
-
-      // Load protobuf using global `protobuf`
+      const protoUrl = 'https://cdn.jsdelivr.net/gh/SomayaQM/pipe_cat@main/frames.proto';
       protobuf.load(protoUrl, (err, root) => {
           if (err) {
               this.progressText.textContent = 'Error loading protobuf';
-              console.error(err);
+              console.error('Proto load error:', err);
               return;
           }
           this.Frame = root.lookupType('pipecat.Frame');
@@ -86,7 +81,6 @@ class PipecatWidget extends HTMLElement {
           this.startBtn.disabled = false;
       });
 
-      // Open / close
       this.widgetIcon.addEventListener('click', () => {
           this.widget.style.display = 'block';
           this.widgetIcon.style.display = 'none';
@@ -96,18 +90,13 @@ class PipecatWidget extends HTMLElement {
           this.widget.style.display = 'none';
           this.widgetIcon.style.display = 'flex';
       });
-
-      // Minimize
       this.minimizeBtn.addEventListener('click', () => {
           this.content.classList.toggle('hidden');
           this.minimizeBtn.textContent = this.content.classList.contains('hidden') ? '+' : '−';
       });
-
-      // Start / Stop
       this.startBtn.addEventListener('click', () => this.startAudio());
       this.stopBtn.addEventListener('click', () => this.stopAudio(true));
 
-      // Draggable
       const header = this.shadowRoot.querySelector('#widget-header');
       header.addEventListener('mousedown', (e) => {
           this.isDragging = true;
@@ -160,8 +149,8 @@ class PipecatWidget extends HTMLElement {
   }
 
   initWebSocket() {
-      const url = this.getAttribute('server-url') || 'ws://localhost:8765';
-      this.ws = new WebSocket(url);
+      const serverUrl = this.getAttribute('server-url') || 'ws://localhost:8765';
+      this.ws = new WebSocket(serverUrl);
       this.ws.binaryType = 'arraybuffer';
 
       this.ws.addEventListener('open', () => {
