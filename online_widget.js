@@ -24,7 +24,7 @@ class PipecatWidget extends HTMLElement {
               .hidden { display:none !important;}
           </style>
 
-          <div id="widget-icon">🤖</div>
+          <div id="widget-icon">🎤</div>
           <div id="widget-container">
               <div id="widget-header">
                   <div><span>Pipecat Widget</span><span id="statusIndicator" class="status-indicator"></span></div>
