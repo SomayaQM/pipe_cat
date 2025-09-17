@@ -1,7 +1,67 @@
+// Audio processor worklet - save this as audio-processor.js
+const audioProcessorCode = `
+class AudioProcessor extends AudioWorkletProcessor {
+  process(inputs) {
+    const input = inputs[0];
+    if (input.length > 0) {
+      const pcmData = this.convertFloat32ToS16PCM(input[0]);
+      this.port.postMessage({ pcmData }, [pcmData.buffer]);
+    }
+    return true;
+  }
+
+  convertFloat32ToS16PCM(input) {
+    const length = input.length;
+    const output = new Int16Array(length);
+    for (let i = 0; i < length; i++) {
+      const s = Math.max(-1, Math.min(1, input[i]));
+      output[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+    }
+    return output.buffer;
+  }
+}
+
+registerProcessor('audio-processor', AudioProcessor);
+`;
+
+// Create a blob URL for the audio processor
+const audioProcessorBlob = new Blob([audioProcessorCode], { type: 'application/javascript' });
+const audioProcessorUrl = URL.createObjectURL(audioProcessorBlob);
+
+// Performance monitoring
+const perf = {
+    start: {},
+    end: {},
+    measure: (name) => {
+        perf.start[name] = performance.now();
+    },
+    endMeasure: (name) => {
+        perf.end[name] = performance.now();
+        console.log(`${name} took ${perf.end[name] - perf.start[name]}ms`);
+    }
+};
+
 class PipecatWidget extends HTMLElement {
   constructor() {
       super();
       this.attachShadow({ mode: 'open' });
+      
+      // Connection state
+      this.ws = null;
+      this.reconnectAttempts = 0;
+      this.maxReconnectAttempts = 5;
+      this.reconnectDelay = 1000;
+      this.reconnectTimeout = null;
+      this.isConnecting = false;
+      
+      // Audio processing state
+      this.audioContext = null;
+      this.audioWorkletNode = null;
+      this.mediaStream = null;
+      this.audioBuffer = [];
+      this.isProcessingAudio = false;
+      this.audioQueue = [];
+      this.bufferSize = 5; // Number of audio chunks to buffer
 
       // HTML structure
       this.shadowRoot.innerHTML = `
@@ -40,6 +100,7 @@ class PipecatWidget extends HTMLElement {
           </div>
       `;
 
+      // Cache DOM elements
       this.widget = this.shadowRoot.querySelector('#widget-container');
       this.widgetIcon = this.shadowRoot.querySelector('#widget-icon');
       this.content = this.shadowRoot.querySelector('#widget-content');
@@ -49,6 +110,9 @@ class PipecatWidget extends HTMLElement {
       this.closeBtn = this.shadowRoot.querySelector('#closeBtn');
       this.statusIndicator = this.shadowRoot.querySelector('#statusIndicator');
       this.progressText = this.shadowRoot.querySelector('#progressText');
+
+      // Initialize audio context on user interaction
+      this.initAudioContext();
 
       this.SAMPLE_RATE = 16000;
       this.NUM_CHANNELS = 1;
@@ -68,18 +132,111 @@ class PipecatWidget extends HTMLElement {
       this.offsetY = 0;
   }
 
-  connectedCallback() {
-      const protoUrl = 'https://cdn.jsdelivr.net/gh/SomayaQM/pipe_cat@main/frames.proto';
-      protobuf.load(protoUrl, (err, root) => {
-          if (err) {
-              this.progressText.textContent = 'Error loading protobuf';
-              console.error('Proto load error:', err);
-              return;
-          }
-          this.Frame = root.lookupType('pipecat.Frame');
-          this.progressText.textContent = 'Ready! Click Start Audio';
-          this.startBtn.disabled = false;
+  async initAudioContext() {
+    perf.measure('audioContextInit');
+    try {
+      // Create audio context on user interaction
+      this.audioContext = new (window.AudioContext || window.webkitAudioContext)({
+        sampleRate: 16000,
+        latencyHint: 'interactive'
       });
+
+      // Warm up the audio context
+      await this.audioContext.resume();
+      
+      // Load audio worklet
+      try {
+        perf.measure('workletLoad');
+        await this.audioContext.audioWorklet.addModule(audioProcessorUrl);
+        perf.endMeasure('workletLoad');
+        
+        this.audioWorkletNode = new AudioWorkletNode(
+          this.audioContext,
+          'audio-processor',
+          { 
+            numberOfInputs: 1, 
+            numberOfOutputs: 1,
+            outputChannelCount: [1],
+            processorOptions: {
+              sampleRate: 16000
+            }
+          }
+        );
+        
+        // Handle audio data from worklet with buffering
+        this.audioWorkletNode.port.onmessage = (event) => {
+          if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+            this.bufferAudioData(event.data.pcmData);
+          }
+        };
+        
+        // Connect the worklet to the destination
+        this.audioWorkletNode.connect(this.audioContext.destination);
+        
+        perf.endMeasure('audioContextInit');
+      } catch (e) {
+        console.error('AudioWorklet error:', e);
+        this.progressText.textContent = 'Audio processing error. Please refresh the page.';
+        throw e; // Don't fall back to ScriptProcessor
+      }
+    } catch (e) {
+      console.error('AudioContext error:', e);
+      this.progressText.textContent = 'Audio not supported in this browser';
+      throw e;
+    }
+  }
+  
+  // Buffer audio data to handle network latency
+  bufferAudioData(audioData) {
+    this.audioBuffer.push(audioData);
+    
+    // If we're not already processing the buffer and have enough data, start processing
+    if (!this.isProcessingAudio && this.audioBuffer.length >= this.bufferSize) {
+      this.processAudioBuffer();
+    }
+  }
+  
+  async processAudioBuffer() {
+    if (this.audioBuffer.length === 0) {
+      this.isProcessingAudio = false;
+      return;
+    }
+    
+    this.isProcessingAudio = true;
+    const chunk = this.audioBuffer.shift();
+    
+    try {
+      if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+        this.ws.send(chunk);
+      }
+      
+      // Process next chunk on next tick to avoid blocking
+      requestAnimationFrame(() => this.processAudioBuffer());
+    } catch (e) {
+      console.error('Error sending audio data:', e);
+      this.isProcessingAudio = false;
+    }
+  }
+
+  // Removed fallbackToScriptProcessor as it's deprecated
+
+  async connectedCallback() {
+    try {
+      // Load protobuf
+      const protoUrl = 'https://cdn.jsdelivr.net/gh/SomayaQM/pipe_cat@main/frames.proto';
+      this.Frame = await new Promise((resolve, reject) => {
+        protobuf.load(protoUrl, (err, root) => {
+          if (err) return reject(err);
+          resolve(root.lookupType('pipecat.Frame'));
+        });
+      });
+      
+      this.progressText.textContent = 'Ready! Click Start Audio';
+      this.startBtn.disabled = false;
+    } catch (err) {
+      console.error('Proto load error:', err);
+      this.progressText.textContent = 'Error loading required resources';
+    }
 
       this.widgetIcon.addEventListener('click', () => {
           this.widget.style.display = 'block';
@@ -117,80 +274,132 @@ class PipecatWidget extends HTMLElement {
       });
   }
 
-  startAudio() {
-      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-          alert('getUserMedia not supported');
-          return;
-      }
+  async startAudio() {
+    if (!navigator.mediaDevices?.getUserMedia) {
+      alert('Audio recording not supported in this browser');
+      return;
+    }
+
+    try {
       this.startBtn.disabled = true;
       this.stopBtn.disabled = false;
+      this.progressText.textContent = 'Connecting...';
 
-      this.audioContext = new (window.AudioContext || window.webkitAudioContext)({
-          latencyHint: 'interactive',
-          sampleRate: this.SAMPLE_RATE
+      // Resume audio context if it was suspended
+      if (this.audioContext.state === 'suspended') {
+        await this.audioContext.resume();
+      }
+
+      // Get microphone access
+      this.mediaStream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          sampleRate: 16000,
+          channelCount: 1,
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true
+        }
       });
 
-      this.isPlaying = true;
-      this.initWebSocket();
+      // Connect audio stream to worklet/processor
+      const source = this.audioContext.createMediaStreamSource(this.mediaStream);
+      if (this.audioWorkletNode) {
+        source.connect(this.audioWorkletNode);
+        this.audioWorkletNode.connect(this.audioContext.destination);
+      } else if (this.scriptProcessor) {
+        source.connect(this.scriptProcessor);
+        this.scriptProcessor.connect(this.audioContext.destination);
+      }
+
+      // Initialize WebSocket connection
+      await this.initWebSocket();
+      this.progressText.textContent = 'Connected! Speak now...';
+      
+    } catch (error) {
+      console.error('Error starting audio:', error);
+      this.progressText.textContent = `Error: ${error.message}`;
+      this.stopAudio();
+    }
   }
 
-  stopAudio(closeWebsocket) {
-      this.playTime = 0;
-      this.isPlaying = false;
-      this.startBtn.disabled = false;
-      this.stopBtn.disabled = true;
-
-      if (this.ws && closeWebsocket) {
-          this.ws.close();
-          this.ws = null;
-      }
-      if (this.scriptProcessor) this.scriptProcessor.disconnect();
-      if (this.source) this.source.disconnect();
+  stopAudio(closeWebsocket = true) {
+    this.isPlaying = false;
+    this.startBtn.disabled = false;
+    this.stopBtn.disabled = true;
+    
+    // Stop all audio tracks
+    if (this.mediaStream) {
+      this.mediaStream.getTracks().forEach(track => track.stop());
+      this.mediaStream = null;
+    }
+    
+    // Close WebSocket connection
+    if (this.ws && closeWebsocket) {
+      this.ws.close();
+      this.ws = null;
+    }
+    
+    // Clean up audio nodes
+    if (this.audioWorkletNode) {
+      this.audioWorkletNode.disconnect();
+    }
+    if (this.scriptProcessor) {
+      this.scriptProcessor.disconnect();
+    }
+    
+    this.progressText.textContent = 'Ready! Click Start Audio';
   }
 
   initWebSocket() {
-      const serverUrl = this.getAttribute('server-url') || 'ws://localhost:8765';
-      this.ws = new WebSocket(serverUrl);
-      this.ws.binaryType = 'arraybuffer';
-
-      this.ws.addEventListener('open', () => {
-          this.statusIndicator.classList.add('connected');
-          navigator.mediaDevices.getUserMedia({ audio: { sampleRate: this.SAMPLE_RATE, channelCount: this.NUM_CHANNELS } })
-              .then(stream => {
-                  this.microphoneStream = stream;
-                  this.scriptProcessor = this.audioContext.createScriptProcessor(512, 1, 1);
-                  this.source = this.audioContext.createMediaStreamSource(stream);
-                  this.source.connect(this.scriptProcessor);
-                  this.scriptProcessor.connect(this.audioContext.destination);
-
-                  this.scriptProcessor.onaudioprocess = (event) => {
-                      if (!this.ws) return;
-                      const audioData = event.inputBuffer.getChannelData(0);
-                      const pcmS16Array = this.convertFloat32ToS16PCM(audioData);
-                      const pcmByteArray = new Uint8Array(pcmS16Array.buffer);
-
-                      const frame = this.Frame.create({
-                          audio: {
-                              audio: Array.from(pcmByteArray),
-                              sampleRate: this.SAMPLE_RATE,
-                              numChannels: this.NUM_CHANNELS
-                          }
-                      });
-                      const encodedFrame = new Uint8Array(this.Frame.encode(frame).finish());
-                      this.ws.send(encodedFrame);
-                  };
-              }).catch(err => console.error('Microphone error:', err));
+    return new Promise((resolve, reject) => {
+      try {
+        this.ws.close();
+      } catch (e) {
+        console.warn('Error closing WebSocket:', e);
+        reject(error);
+      }
+    });
+  }
+  
+  handleAudioResponse(audioData) {
+    if (!this.isPlaying) return;
+    
+    try {
+      const parsedFrame = this.Frame.decode(new Uint8Array(audioData));
+      if (!parsedFrame?.audio) return;
+      
+      const audioVector = Array.from(parsedFrame.audio.audio);
+      const audioArray = new Uint8Array(audioVector);
+      
+      this.audioContext.decodeAudioData(audioArray.buffer, (buffer) => {
+        const source = this.audioContext.createBufferSource();
+        source.buffer = buffer;
+        source.connect(this.audioContext.destination);
+        source.start(0);
       });
-
-      this.ws.addEventListener('message', (event) => {
-          if (this.isPlaying) this.enqueueAudioFromProto(event.data);
-      });
-
-      this.ws.addEventListener('close', () => {
-          this.statusIndicator.classList.remove('connected');
-          this.stopAudio(false);
-      });
-      this.ws.addEventListener('error', e => console.error('WebSocket error:', e));
+    } catch (error) {
+      console.error('Error processing audio response:', error);
+    }
+  }
+  
+  handleReconnect() {
+    if (this.reconnectAttempts >= this.maxReconnectAttempts) {
+      console.error('Max reconnection attempts reached');
+      this.progressText.textContent = 'Connection lost. Please refresh the page.';
+      return;
+    }
+    
+    const delay = Math.min(this.reconnectDelay * Math.pow(2, this.reconnectAttempts), 30000);
+    this.reconnectAttempts++;
+    
+    console.log(`Reconnecting in ${delay}ms... (attempt ${this.reconnectAttempts})`);
+    this.progressText.textContent = `Reconnecting... (${this.reconnectAttempts}/${this.maxReconnectAttempts})`;
+    
+    setTimeout(() => {
+      if (this.isPlaying) {
+        this.initWebSocket().catch(console.error);
+      }
+    }, delay);
   }
 
   enqueueAudioFromProto(arrayBuffer) {
@@ -214,13 +423,14 @@ class PipecatWidget extends HTMLElement {
       });
   }
 
-  convertFloat32ToS16PCM(float32Array) {
-      const int16Array = new Int16Array(float32Array.length);
-      for (let i = 0; i < float32Array.length; i++) {
-          const clamped = Math.max(-1, Math.min(1, float32Array[i]));
-          int16Array[i] = clamped < 0 ? clamped * 32768 : clamped * 32767;
-      }
-      return int16Array;
+  // Clean up resources when element is removed
+  disconnectedCallback() {
+    this.stopAudio();
+    if (this.audioContext) {
+      this.audioContext.close();
+    }
+    // Revoke the blob URL to prevent memory leaks
+    URL.revokeObjectURL(audioProcessorUrl);
   }
 }
 
